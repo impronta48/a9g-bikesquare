@@ -48,18 +48,13 @@
 #define ENGINE_TASK_PRIORITY      0
 #define ENGINE_TASK_NAME          "ENGINE Test Task"
 
-#define TIMER_TASK_STACK_SIZE    (1024)
-#define TIMER_TASK_PRIORITY      0
-#define TIMER_TASK_NAME          "Timer Task"
-
 #define SOFT_VERSION          "000"
 #define FOTA_HTTP_SERVER      "http://spillohome.asuscomm.com:9811/fota/A9G_%s_FW_tonew.pack"
 
-#define GPS_REFRESH_TIME 2500
-#define WRITE_INFO_TIME 30000
+#define GPS_REFRESH_TIME 30000
 #define DURATA_WATCHDOG 300   // in secondi, alla scadenza resetta il device. Viene riarmato quando riesce a inviare qualcosa al server
-#define INTERVALLO_METRONOMO 1000 // timer per contare quanto manca allo scadere del watchdog
 
+void parseServerResponse(char []);
 void SetBikeLockLocked();
 void SetBikeLockUnLocked();
 void updateFOTA();
@@ -68,10 +63,7 @@ int getNumber(char []);
 
 bool networkFlag = false;
 
-int ct_secondiMetronomo = 0;
-
 static HANDLE socketTaskHandle = NULL;
-static HANDLE timerTask = NULL;
 
 int socketFd = -1;
 uint8_t buffer[RECEIVE_BUFFER_MAX_LENGTH];
@@ -210,104 +202,15 @@ void EventDispatch(API_Event_t* pEvent)
         {
             int fd = pEvent->param1;
             int length = pEvent->param2>RECEIVE_BUFFER_MAX_LENGTH?RECEIVE_BUFFER_MAX_LENGTH:pEvent->param2;
+            char rsp[20];
+
             memset(buffer,0,sizeof(buffer));
             length = Socket_TcpipRead(fd,buffer,length);
-            Trace(2,"%ssocket %d received %d bytes data:%s",FNAME,fd,length,buffer);
-            char rsp[20];
+            Trace(2,"%ssocket %d received %d bytes data:%s",FNAME,fd,length,buffer);            
             sprintf(rsp, "%s", buffer);
-            Trace(2, rsp);
-
-
-
-
-
-            char motore[10];
-            char versione[10];
-            char cmdLucchetto[610];
-            //char rsp[20]="[off|v|unlock]";
-
-
-            char *sptr, *lptr;
-            int len;
-            lptr = rsp;                                   // start of search
-            lptr++;
-            sptr = strchr(lptr, '|');
-            if (sptr != NULL){
-                len = sptr - lptr;                          // length of phrase
-                //printf(" lptr :'%s\n sptr :'%s\n len :'%d'\n",lptr,sptr,len);
-
-                if (len >0 ){
-                    memcpy(motore, lptr, len);               // copy the substring
-                    motore[len]= '\0';
-                }
-
-                lptr = sptr;
-                lptr++;
-                sptr = strchr(lptr, '|');
-                len = sptr - lptr;                          // length of phrase
-                //printf(" lptr :'%s\n sptr :'%s\n len :'%d'\n",lptr,sptr,len);
-                versione[len]= '\0';
-                if (len >0 ){
-                    memcpy(versione, lptr, len);               // copy the substring
-                    versione[len]= '\0';
-                }
-
-
-                lptr = sptr;
-                lptr++;
-                sptr = strchr(lptr, ']');
-                len = sptr - lptr;                          // length of phrase
-                //printf(" lptr :'%s\n sptr :'%s\n len :'%d'\n",lptr,sptr,len);
-
-                if (len >0 ){
-                    memcpy(cmdLucchetto, lptr, len);               // copy the substring
-                    cmdLucchetto[len]= '\0';
-                }
-
-                Trace(2, "%s motore :'%s' versione :'%s' lucchetto :'%s'",FNAME,motore,versione,cmdLucchetto);
-                //printf("%s motore :'%s' versione :'%s' lucchetto :'%s'\n",motore,versione,cmdLucchetto);
-            }
-
-
-
-
-            if(!strcmp(motore, "on")){
-                Trace(2, "%son command received",FNAME);
-                //GPIO_SetLevel(engine, GPIO_LEVEL_HIGH);
-                GPIO_SetLevel(engine, GPIO_LEVEL_LOW);
-                engineStatus=1;
-                // temporary drive also the lock pin -> SetBikeLockUnLocked
-                //Trace(2, "%sTEST ONLY-->>, calling SetBikeLockUnLocked (Aperto also when receiving [on] command",FNAME);
-                //SetBikeLockUnLocked();
-            }else if(!strcmp(motore, "off")){
-                Trace(2, "%soff command received",FNAME);
-                //GPIO_SetLevel(engine, GPIO_LEVEL_LOW);
-                GPIO_SetLevel(engine, GPIO_LEVEL_HIGH);
-                engineStatus=0;
-
-                // temporary drive also the lock pin -> SetBikeLockLocked
-                //Trace(2, "%sTEST ONLY-->>, calling SetBikeLockLocked (Chiuso) also when receiving [off] command",FNAME);
-                //SetBikeLockLocked();
-            }
-
-            if(!strcmp(rsp, "[V?]")){
-                sendVersion=true;
-            }else if(rsp[1]=='V'){
-                int verNumber = getNumber(rsp);
-                if(atoi(SOFT_VERSION)<verNumber) {
-                    updateFOTA();
-                }
-            }
-
-            if(!strcmp(cmdLucchetto, "lock")){
-                Trace(2, "%slock command received",FNAME);
-                Trace(2, "%scalling SetBikeLockLocked ",FNAME);
-                SetBikeLockLocked();
-            } else if(!strcmp(cmdLucchetto, "unlock")){
-                Trace(2, "%son command received",FNAME);
-                Trace(2, "%scalling SetBikeLockUnLocked ",FNAME);
-                SetBikeLockUnLocked();
-            }
+            Trace(2, "%s, Chiamo Parser per Motore, Lucchetto, Versione;%s",FNAME,rsp);
+            parseServerResponse(rsp);
+            Trace(2, "%s, Parsing completo e stati aggiornati", FNAME);
             break;
         }
         case API_EVENT_ID_SOCKET_CLOSED:
@@ -360,8 +263,107 @@ void EventDispatch(API_Event_t* pEvent)
     }
 }
 
+// Il server di bikesquare invia una risposta codificata 
+// che contiene lo stato del motore, del lucchetto e la richiesta di una nuova versione del sw
+void parseServerResponse(char response[]){
+    const char FNAME[] = "parseServerResponse->";
+    char motore[10];
+    char versione[10];
+    char cmdLucchetto[610];
+    // char response[20]="[off|v|unlock]";
 
+    char *sptr, *lptr;
+    int len;
+    lptr = response; // start of search
+    lptr++;
+    sptr = strchr(lptr, '|');
+    if (sptr != NULL)
+    {
+        len = sptr - lptr; // length of phrase
+        // printf(" lptr :'%s\n sptr :'%s\n len :'%d'\n",lptr,sptr,len);
 
+        if (len > 0)
+        {
+            memcpy(motore, lptr, len); // copy the substring
+            motore[len] = '\0';
+        }
+
+        lptr = sptr;
+        lptr++;
+        sptr = strchr(lptr, '|');
+        len = sptr - lptr; // length of phrase
+        // printf(" lptr :'%s\n sptr :'%s\n len :'%d'\n",lptr,sptr,len);
+        versione[len] = '\0';
+        if (len > 0)
+        {
+            memcpy(versione, lptr, len); // copy the substring
+            versione[len] = '\0';
+        }
+
+        lptr = sptr;
+        lptr++;
+        sptr = strchr(lptr, ']');
+        len = sptr - lptr; // length of phrase
+        // printf(" lptr :'%s\n sptr :'%s\n len :'%d'\n",lptr,sptr,len);
+
+        if (len > 0)
+        {
+            memcpy(cmdLucchetto, lptr, len); // copy the substring
+            cmdLucchetto[len] = '\0';
+        }
+
+        Trace(2, "%s motore :'%s' versione :'%s' lucchetto :'%s'", FNAME, motore, versione, cmdLucchetto);
+        // printf("%s motore :'%s' versione :'%s' lucchetto :'%s'\n",motore,versione,cmdLucchetto);
+    }
+
+    if (!strcmp(motore, "on"))
+    {
+        Trace(2, "%son command received", FNAME);
+        // GPIO_SetLevel(engine, GPIO_LEVEL_HIGH);
+        GPIO_SetLevel(engine, GPIO_LEVEL_LOW);
+        engineStatus = 1;
+        // temporary drive also the lock pin -> SetBikeLockUnLocked
+        // Trace(2, "%sTEST ONLY-->>, calling SetBikeLockUnLocked (Aperto also when receiving [on] command",FNAME);
+        // SetBikeLockUnLocked();
+    }
+    else if (!strcmp(motore, "off"))
+    {
+        Trace(2, "%soff command received", FNAME);
+        // GPIO_SetLevel(engine, GPIO_LEVEL_LOW);
+        GPIO_SetLevel(engine, GPIO_LEVEL_HIGH);
+        engineStatus = 0;
+
+        // temporary drive also the lock pin -> SetBikeLockLocked
+        // Trace(2, "%sTEST ONLY-->>, calling SetBikeLockLocked (Chiuso) also when receiving [off] command",FNAME);
+        // SetBikeLockLocked();
+    }
+
+    if (!strcmp(response, "[V?]"))
+    {
+        sendVersion = true;
+    }
+    else if (response[1] == 'V')
+    {
+        int verNumber = getNumber(response);
+        if (atoi(SOFT_VERSION) < verNumber)
+        {
+            updateFOTA();
+        }
+    }
+
+    if (!strcmp(cmdLucchetto, "lock"))
+    {
+        Trace(2, "%slock command received", FNAME);
+        Trace(2, "%scalling SetBikeLockLocked ", FNAME);
+        SetBikeLockLocked();
+    }
+    else if (!strcmp(cmdLucchetto, "unlock"))
+    {
+        Trace(2, "%son command received", FNAME);
+        Trace(2, "%scalling SetBikeLockUnLocked ", FNAME);
+        SetBikeLockUnLocked();
+    }
+}
 
 static void processFotaUpgradeData(const unsigned char *data, int len)
 {
@@ -472,6 +474,7 @@ bool Connect()
     }
     return true;
 }
+
 bool Write(uint8_t* data, uint16_t len)
 {
     const char FNAME[] = "Write->";
@@ -533,12 +536,9 @@ void GPS_Task(void *pData)
     GPS_Init();
     GPS_Open(NULL);
 
-
-
     //wait for gps start up, or gps will not response command
     while(gpsInfo->rmc.latitude.value == 0)
         OS_Sleep(1000);
-
 
     // set gps nmea output interval
     for(uint8_t i = 0;i<5;++i)
@@ -555,10 +555,17 @@ void GPS_Task(void *pData)
     else
         Trace(1,"%sgps firmware version:%s",FNAME,buffer2);
 
-    if(!GPS_SetOutputInterval(1000))
-        Trace(1,"%sset nmea output interval fail",FNAME);
 
-    Trace(1,"%sinit ok",FNAME);
+    if(!GPS_SetFixMode(GPS_FIX_MODE_LOW_SPEED))
+        Trace(1,"%sset fix mode fail",FNAME);
+
+    if (!GPS_SetLpMode(GPS_LP_MODE_SUPPER_LP))
+        Trace(1, "%sset gps lp mode fail", FNAME);
+
+    if (!GPS_SetOutputInterval(1000))
+        Trace(1, "%sset nmea output interval fail", FNAME);
+
+    Trace(1,"%sGPS init ok",FNAME);
 
     while(1){
         if(isGpsOn)
@@ -592,7 +599,6 @@ void GPS_Task(void *pData)
 
 
             //you can copy ` latitude,longitude ` to http://www.gpsspg.com/maps.htm check location on map
-
             snprintf(buffer2,sizeof(buffer2),"GPS fix mode:%d, BDS fix mode:%d, fix quality:%d, satellites tracked:%d, gps sates total:%d, is fixed:%s, coordinate:WGS84, Latitude:%f, Longitude:%f, unit:degree,altitude:%f",gpsInfo->gsa[0].fix_type, gpsInfo->gsa[1].fix_type,
                                                                 gpsInfo->gga.fix_quality,gpsInfo->gga.satellites_tracked, gpsInfo->gsv[0].total_sats, isFixedStr, latitude,longitude,gpsInfo->gga.altitude);
 
@@ -602,6 +608,7 @@ void GPS_Task(void *pData)
             //UART_Write(UART1,buffer,strlen(buffer));
             //UART_Write(UART1,"\r\n\r\n",4);
         }
+
         Trace(1,"%spreparo a sleep",FNAME);
         PM_SleepMode(true);
         OS_Sleep(GPS_REFRESH_TIME);
@@ -644,14 +651,13 @@ void ConnectAndWrite_Task(void* param)
                     ++failCount;
             }
             else
-            {
-                //if(isFixed==2 || isFixed==3){
+            {                
                     if(ADC_Read(ADC_CHANNEL_0, &batteryLevel, &battery_mV))
                         Trace(2,"%sADC value:%d, %dmV",FNAME, batteryLevel, battery_mV);
                     sprintf(date, "%02d/%02d/%02d", gpsInfo->rmc.date.year, gpsInfo->rmc.date.month, gpsInfo->rmc.date.day);
                     sprintf(time, "%02d:%02d:%02d", gpsInfo->rmc.time.hours,gpsInfo->rmc.time.minutes,gpsInfo->rmc.time.seconds);
                     Trace(2,"%sCheck GPS fixed mode",FNAME);
-                    if(isFixed==2 || isFixed==3) {
+                    if(isFixed>=1) {
                         Trace(2,"%sFixed 2 or 3, preparing real coordinates",FNAME);
                         sprintf(to_send_string, "bnmm;%s;%f;%f;%s,%s+%02d;%05d;%d", IMEI, latitude, longitude, date, time, gpsInfo->zda.hour_offset, batteryLevel, engineStatus);
                         }
@@ -670,47 +676,19 @@ void ConnectAndWrite_Task(void* param)
                         Trace(2,"%swrite fail",FNAME);
                     }
                     else{
-                        Trace(2,"%sRiarmo WatchDog",FNAME);
-                        ct_secondiMetronomo = 0;
+                        Trace(2,"%sRiarmo WatchDog",FNAME);                        
                         WatchDog_KeepAlive();
                     }
                 //}
             }
             Trace(2,"%sLoop applicativo count:%d failcount:%d isFixed:%d sem:%d",FNAME,count++, failCount,isFixed, (int)sem);
-        OS_Sleep(WRITE_INFO_TIME);
+            Trace(1,"%spreparo a sleep",FNAME);
+            PM_SleepMode(true);
+            OS_Sleep(GPS_REFRESH_TIME);
+            Trace(1,"%sfine sleep",FNAME);
+            PM_SleepMode(false);
     }
 }
-
-void StartTimer1(uint32_t interval);
-
-void OnTimer1(void* param)
-{
-    const char FNAME[] = "OnTimer1->";
-    Trace(1,"%sMetronomo,tempo assoluto:%dms",FNAME,(uint32_t)(clock()/CLOCKS_PER_MSEC));
-    Trace(1,"%sSecondi allo scadere del reset : %d",FNAME, DURATA_WATCHDOG - ct_secondiMetronomo);
-    ct_secondiMetronomo++;
-    StartTimer1(INTERVALLO_METRONOMO);
-}
-
-void StartTimer1(uint32_t interval)
-{
-    OS_StartCallbackTimer(timerTask,interval,OnTimer1,NULL);
-}
-
-void TimerTask(void* param)
-{
-    API_Event_t* event=NULL;
-    while(1)
-    {
-        if(OS_WaitEvent(timerTask, (void**)&event, OS_TIME_OUT_WAIT_FOREVER))
-        {
-            OS_Free(event->pParam1);
-            OS_Free(event->pParam2);
-            OS_Free(event);
-        }
-    }
-}
-
 
 void MainTask_Task(void *pData)
 {
@@ -719,15 +697,17 @@ void MainTask_Task(void *pData)
     API_Event_t* event=NULL;
     TIME_SetIsAutoUpdateRtcTime(true);
 
-
     OS_Sleep(3000);
     Trace(1,"%sDelay Iniziale precauzionale 3000",FNAME);
 
     Trace(1,"%sAvvio watchdog per reset in assenza invii validi durata in secondi: %d ",FNAME,DURATA_WATCHDOG);
     WatchDog_Open(WATCHDOG_SECOND_TO_TICK(DURATA_WATCHDOG));
-    Trace(1,"%sAvvio METRONOMO ogni: %d secondi",FNAME,INTERVALLO_METRONOMO);
-    StartTimer1(INTERVALLO_METRONOMO);
 
+    //Spengo le periferiche che non uso
+    PM_PowerEnable(POWER_TYPE_VPAD, false);
+    PM_PowerEnable(POWER_TYPE_MMC, false);
+    PM_PowerEnable(POWER_TYPE_LCD, false);
+    PM_PowerEnable(POWER_TYPE_CAM, false);    
 
     // semGPRS = OS_CreateSemaphore(0);
     CreateSem(&sem);
@@ -754,8 +734,7 @@ void MainTask_Task(void *pData)
     OS_CreateTask(GPS_Task,
             NULL, NULL, GPS_TASK_STACK_SIZE, GPS_TASK_PRIORITY, 0, 0, GPS_TASK_NAME);
 
-
-
+    PM_SleepMode(true);
     while(1)
     {
         if(OS_WaitEvent(socketTaskHandle, (void**)&event, OS_TIME_OUT_WAIT_FOREVER))
@@ -770,12 +749,8 @@ void MainTask_Task(void *pData)
 
 void bikesquare_Main(void)
 {
-    timerTask = OS_CreateTask(TimerTask,
-    NULL, NULL, TIMER_TASK_STACK_SIZE, TIMER_TASK_PRIORITY, 0, 0, TIMER_TASK_NAME);
-
     socketTaskHandle = OS_CreateTask(MainTask_Task,
         NULL, NULL, MAIN_TASK_STACK_SIZE, MAIN_TASK_PRIORITY, 0, 0, MAIN_TASK_NAME);
-
 
     OS_SetUserMainHandle(&socketTaskHandle);
 }
